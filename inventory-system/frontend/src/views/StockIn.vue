@@ -55,9 +55,12 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, inject } from 'vue'
 import { ElMessage } from 'element-plus'
 import { itemsAPI, stockAPI } from '../api'
+
+const refreshAlerts = inject('refreshAlerts')
+const currentUserId = inject('currentUserId')
 
 const items = ref([])
 const records = ref([])
@@ -99,11 +102,14 @@ const submitStockIn = async () => {
   try {
     const res = await stockAPI.stockIn({
       ...formData.value,
-      operator_id: 1
+      operator_id: currentUserId ? currentUserId.value : 1
     })
     ElMessage.success(res.data.message)
     formData.value = { item_id: null, quantity: 1, remark: '', need_approval: false }
     fetchRecords()
+    if (refreshAlerts) {
+      refreshAlerts()
+    }
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '提交失败')
   }

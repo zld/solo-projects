@@ -63,9 +63,12 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, inject } from 'vue'
 import { ElMessage } from 'element-plus'
 import { approvalAPI } from '../api'
+
+const refreshAlerts = inject('refreshAlerts')
+const currentUserId = inject('currentUserId')
 
 const approvals = ref([])
 const filterStatus = ref('')
@@ -107,11 +110,14 @@ const submitProcess = async () => {
     await approvalAPI.process(currentApproval.value.id, {
       status: processType.value === 'approve' ? 'approved' : 'rejected',
       approval_remark: approvalRemark.value,
-      approver_id: 1
+      approver_id: currentUserId ? currentUserId.value : 1
     })
     ElMessage.success(processType.value === 'approve' ? '已通过' : '已拒绝')
     showProcessDialog.value = false
     fetchApprovals()
+    if (refreshAlerts) {
+      refreshAlerts()
+    }
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '操作失败')
   }

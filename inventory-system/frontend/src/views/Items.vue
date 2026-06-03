@@ -2,7 +2,7 @@
   <div class="items-page">
     <div class="page-header">
       <h2>物品管理</h2>
-      <el-button type="primary" @click="showCreateDialog = true">
+      <el-button v-if="canEdit" type="primary" @click="showCreateDialog = true">
         <el-icon><Plus /></el-icon>
         新增物品
       </el-button>
@@ -32,11 +32,11 @@
         <el-table-column prop="borrowed_quantity" label="已借出" width="100" />
         <el-table-column prop="min_threshold" label="预警阈值" width="100" />
         <el-table-column prop="unit" label="单位" width="80" />
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
-            <el-button size="small" type="primary" link @click="editItem(row)">编辑</el-button>
-            <el-button size="small" type="success" link @click="stockInItem(row)">入库</el-button>
-            <el-button size="small" type="warning" link @click="borrowItem(row)">借出</el-button>
+            <el-button v-if="canEdit" size="small" type="primary" link @click="editItem(row)">编辑</el-button>
+            <el-button v-if="canStockIn" size="small" type="success" link @click="stockInItem(row)">入库</el-button>
+            <el-button v-if="canBorrow" size="small" type="warning" link @click="borrowItem(row)">借出</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -108,10 +108,20 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, inject } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { itemsAPI, stockAPI, borrowAPI } from '../api'
+import { hasPermission } from '../utils/permissions'
+
+const refreshAlerts = inject('refreshAlerts')
+const currentUserId = inject('currentUserId')
+const currentUserRole = inject('currentUserRole')
+const hasPerm = inject('hasPermission', hasPermission)
+
+const canEdit = computed(() => hasPerm(currentUserRole.value, 'items_edit'))
+const canStockIn = computed(() => hasPerm(currentUserRole.value, 'stock_in'))
+const canBorrow = computed(() => hasPerm(currentUserRole.value, 'borrow'))
 
 const items = ref([])
 const searchName = ref('')
@@ -177,13 +187,16 @@ const quickStockIn = async () => {
     await stockAPI.stockIn({
       item_id: selectedItem.value.id,
       quantity: stockInQuantity.value,
-      operator_id: 1,
+      operator_id: currentUserId ? currentUserId.value : 1,
       remark: stockInRemark.value,
       need_approval: false
     })
     ElMessage.success('入库成功')
     showStockInDialog.value = false
     fetchItems()
+    if (refreshAlerts) {
+      refreshAlerts()
+    }
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '入库失败')
   }
@@ -205,13 +218,16 @@ const quickBorrow = async () => {
     await borrowAPI.borrow({
       item_id: selectedItem.value.id,
       quantity: borrowQuantity.value,
-      borrower_id: 1,
+      borrower_id: currentUserId ? currentUserId.value : 1,
       purpose: borrowPurpose.value,
       need_approval: false
     })
     ElMessage.success('借出成功')
     showBorrowDialog.value = false
     fetchItems()
+    if (refreshAlerts) {
+      refreshAlerts()
+    }
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '借出失败')
   }

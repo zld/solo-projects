@@ -23,6 +23,30 @@ app.add_middleware(
 )
 
 
+PAGE_PERMISSIONS = {
+    "dashboard": ["admin", "approver", "user"],
+    "items_view": ["admin", "approver", "user"],
+    "items_edit": ["admin", "approver"],
+    "stock_in": ["admin", "approver"],
+    "borrow": ["admin", "approver", "user"],
+    "approval": ["admin", "approver"],
+    "user_manage": ["admin"],
+    "logs_view": ["admin", "approver", "user"],
+}
+
+
+def check_permission(db: Session, user_id: int, permission: str):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="用户已被禁用")
+    allowed_roles = PAGE_PERMISSIONS.get(permission, [])
+    if user.role not in allowed_roles:
+        raise HTTPException(status_code=403, detail=f"权限不足，需要角色: {allowed_roles}")
+    return user
+
+
 def log_operation(db: Session, operator_id: int, action: str, target_type: str, target_id: int, detail: dict, ip: str = ""):
     log = models.OperationLog(
         operator_id=operator_id,
@@ -59,22 +83,87 @@ def root():
     return {"message": "共享仓库库存系统 API"}
 
 
+@app.get("/api/users/switchable", response_model=List[schemas.User])
+def list_switchable_users(db: Session = Depends(get_db)):
+    return db.query(models.User).filter(models.User.is_active == True).order_by(models.User.id.asc()).all()
+
+
 @app.get("/api/users", response_model=List[schemas.User])
-def list_users(db: Session = Depends(get_db)):
-    return db.query(models.User).all()
+def list_users(role: Optional[str] = None, is_active: Optional[bool] = None, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "user_manage")
+    query = db.query(models.User)
+    if role:
+        query = query.filter(models.User.role == role)
+    if is_active is not None:
+        query = query.filter(models.User.is_active == is_active)
+    return query.order_by(models.User.id.desc()).all()
 
 
 @app.post("/api/users", response_model=schemas.User)
-def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def create_user(user: schemas.UserCreate, request: Request, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "user_manage")
+    existing = db.query(models.User).filter(models.User.username == user.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="用户名已存在")
     db_user = models.User(**user.dict())
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
+    client_host = request.client.host if request.client else ""
+    log_operation(db, operator_id, "创建用户", "user", db_user.id, {"username": user.username, "role": user.role}, client_host)
+    db.commit()
     return db_user
 
 
+@app.get("/api/users/{user_id}", response_model=schemas.User)
+def get_user(user_id: int, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "user_manage")
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return user
+
+
+@app.put("/api/users/{user_id}", response_model=schemas.User)
+def update_user(user_id: int, user_update: schemas.UserUpdate, request: Request, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "user_manage")
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    for key, value in user_update.dict(exclude_unset=True).items():
+        setattr(db_user, key, value)
+    db.commit()
+    db.refresh(db_user)
+    client_host = request.client.host if request.client else ""
+    log_operation(db, operator_id, "更新用户", "user", user_id, user_update.dict(exclude_unset=True), client_host)
+    db.commit()
+    return db_user
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, request: Request, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "user_manage")
+    db_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if db_user.role == "admin":
+        raise HTTPException(status_code=400, detail="不能删除管理员账户")
+    borrowed = db.query(models.BorrowRecord).filter(
+        models.BorrowRecord.borrower_id == user_id,
+        models.BorrowRecord.status == "borrowed"
+    ).count()
+    if borrowed > 0:
+        raise HTTPException(status_code=400, detail=f"该用户有 {borrowed} 条未归还记录，无法删除")
+    client_host = request.client.host if request.client else ""
+    log_operation(db, operator_id, "删除用户", "user", user_id, {"username": db_user.username, "name": db_user.name}, client_host)
+    db.delete(db_user)
+    db.commit()
+    return {"success": True, "message": "用户已删除"}
+
+
 @app.get("/api/items", response_model=List[schemas.Item])
-def list_items(category: Optional[str] = None, low_stock: Optional[bool] = False, db: Session = Depends(get_db)):
+def list_items(category: Optional[str] = None, low_stock: Optional[bool] = False, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "items_view")
     query = db.query(models.Item)
     if category:
         query = query.filter(models.Item.category == category)
@@ -84,7 +173,8 @@ def list_items(category: Optional[str] = None, low_stock: Optional[bool] = False
 
 
 @app.get("/api/items/{item_id}", response_model=schemas.Item)
-def get_item(item_id: int, db: Session = Depends(get_db)):
+def get_item(item_id: int, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "items_view")
     item = db.query(models.Item).filter(models.Item.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="物品不存在")
@@ -92,7 +182,8 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/items", response_model=schemas.Item)
-def create_item(item: schemas.ItemCreate, request: Request, db: Session = Depends(get_db)):
+def create_item(item: schemas.ItemCreate, request: Request, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "items_edit")
     existing = db.query(models.Item).filter(models.Item.sku == item.sku).first()
     if existing:
         raise HTTPException(status_code=400, detail="SKU已存在")
@@ -101,13 +192,14 @@ def create_item(item: schemas.ItemCreate, request: Request, db: Session = Depend
     db.commit()
     db.refresh(db_item)
     client_host = request.client.host if request.client else ""
-    log_operation(db, 1, "创建物品", "item", db_item.id, {"name": item.name, "sku": item.sku}, client_host)
+    log_operation(db, operator_id, "创建物品", "item", db_item.id, {"name": item.name, "sku": item.sku}, client_host)
     db.commit()
     return db_item
 
 
 @app.put("/api/items/{item_id}", response_model=schemas.Item)
-def update_item(item_id: int, item_update: schemas.ItemUpdate, request: Request, db: Session = Depends(get_db)):
+def update_item(item_id: int, item_update: schemas.ItemUpdate, request: Request, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "items_edit")
     db_item = db.query(models.Item).filter(models.Item.id == item_id).first()
     if not db_item:
         raise HTTPException(status_code=404, detail="物品不存在")
@@ -116,13 +208,14 @@ def update_item(item_id: int, item_update: schemas.ItemUpdate, request: Request,
     db.commit()
     db.refresh(db_item)
     client_host = request.client.host if request.client else ""
-    log_operation(db, 1, "更新物品", "item", item_id, item_update.dict(exclude_unset=True), client_host)
+    log_operation(db, operator_id, "更新物品", "item", item_id, item_update.dict(exclude_unset=True), client_host)
     db.commit()
     return db_item
 
 
 @app.post("/api/stock/in")
 def stock_in(request_data: schemas.StockInRequest, request: Request, db: Session = Depends(get_db)):
+    check_permission(db, request_data.operator_id, "stock_in")
     item = db.query(models.Item).filter(models.Item.id == request_data.item_id).with_for_update().first()
     if not item:
         raise HTTPException(status_code=404, detail="物品不存在")
@@ -170,6 +263,7 @@ def stock_in(request_data: schemas.StockInRequest, request: Request, db: Session
 
 @app.post("/api/borrow")
 def borrow_item(request_data: schemas.BorrowRequest, request: Request, db: Session = Depends(get_db)):
+    check_permission(db, request_data.borrower_id, "borrow")
     item = db.query(models.Item).filter(models.Item.id == request_data.item_id).with_for_update().first()
     if not item:
         raise HTTPException(status_code=404, detail="物品不存在")
@@ -217,6 +311,7 @@ def borrow_item(request_data: schemas.BorrowRequest, request: Request, db: Sessi
 
 @app.post("/api/return")
 def return_item(request_data: schemas.ReturnRequest, request: Request, db: Session = Depends(get_db)):
+    check_permission(db, request_data.operator_id, "borrow")
     borrow_record = db.query(models.BorrowRecord).filter(models.BorrowRecord.id == request_data.record_id).first()
     if not borrow_record:
         raise HTTPException(status_code=404, detail="借出记录不存在")
@@ -249,7 +344,8 @@ def return_item(request_data: schemas.ReturnRequest, request: Request, db: Sessi
 
 
 @app.get("/api/borrow-records", response_model=List[schemas.BorrowRecord])
-def list_borrow_records(status: Optional[str] = None, borrower_id: Optional[int] = None, db: Session = Depends(get_db)):
+def list_borrow_records(status: Optional[str] = None, borrower_id: Optional[int] = None, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "borrow")
     query = db.query(models.BorrowRecord)
     if status:
         query = query.filter(models.BorrowRecord.status == status)
@@ -259,7 +355,8 @@ def list_borrow_records(status: Optional[str] = None, borrower_id: Optional[int]
 
 
 @app.get("/api/stock-records", response_model=List[schemas.StockRecord])
-def list_stock_records(item_id: Optional[int] = None, db: Session = Depends(get_db)):
+def list_stock_records(item_id: Optional[int] = None, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "stock_in")
     query = db.query(models.StockRecord)
     if item_id:
         query = query.filter(models.StockRecord.item_id == item_id)
@@ -267,7 +364,8 @@ def list_stock_records(item_id: Optional[int] = None, db: Session = Depends(get_
 
 
 @app.get("/api/approvals", response_model=List[schemas.Approval])
-def list_approvals(status: Optional[str] = None, db: Session = Depends(get_db)):
+def list_approvals(status: Optional[str] = None, db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "approval")
     query = db.query(models.Approval)
     if status:
         query = query.filter(models.Approval.status == status)
@@ -276,6 +374,7 @@ def list_approvals(status: Optional[str] = None, db: Session = Depends(get_db)):
 
 @app.post("/api/approvals/{approval_id}/process")
 def process_approval(approval_id: int, process_data: schemas.ApprovalProcess, request: Request, db: Session = Depends(get_db)):
+    check_permission(db, process_data.approver_id, "approval")
     approval = db.query(models.Approval).filter(models.Approval.id == approval_id).with_for_update().first()
     if not approval:
         raise HTTPException(status_code=404, detail="审批不存在")
@@ -334,7 +433,8 @@ def process_approval(approval_id: int, process_data: schemas.ApprovalProcess, re
 
 
 @app.get("/api/operation-logs", response_model=List[schemas.OperationLog])
-def list_operation_logs(target_type: Optional[str] = None, operator_id: Optional[int] = None, db: Session = Depends(get_db)):
+def list_operation_logs(target_type: Optional[str] = None, operator_id: Optional[int] = None, db: Session = Depends(get_db), viewer_id: int = 1):
+    check_permission(db, viewer_id, "logs_view")
     query = db.query(models.OperationLog)
     if target_type:
         query = query.filter(models.OperationLog.target_type == target_type)
@@ -344,7 +444,8 @@ def list_operation_logs(target_type: Optional[str] = None, operator_id: Optional
 
 
 @app.get("/api/alerts")
-def get_alerts(db: Session = Depends(get_db)):
+def get_alerts(db: Session = Depends(get_db), operator_id: int = 1):
+    check_permission(db, operator_id, "dashboard")
     low_stock_items = db.query(models.Item).filter(
         models.Item.available_quantity < models.Item.min_threshold
     ).all()

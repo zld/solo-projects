@@ -17,15 +17,12 @@
               <el-input-number v-model="borrowForm.quantity" :min="1" :max="maxQuantity" style="width: 100%" />
             </el-form-item>
             <el-form-item label="借用人">
-              <el-select v-model="borrowForm.borrower_id" placeholder="请选择借用人" style="width: 100%">
-                <el-option v-for="user in users" :key="user.id" :label="user.name" :value="user.id" />
+              <el-select v-model="borrowForm.borrower_id" placeholder="请选择借用人" style="width: 100%" :disabled="!canSelectOtherUser">
+                <el-option v-for="user in borrowableUsers" :key="user.id" :label="user.name" :value="user.id" />
               </el-select>
             </el-form-item>
-            <el-form-item label="用途">
-              <el-input v-model="borrowForm.purpose" type="textarea" />
-            </el-form-item>
             <el-form-item label="需要审批">
-              <el-switch v-model="borrowForm.need_approval" />
+              <el-switch v-model="borrowForm.need_approval" :disabled="!canSkipApproval" />
             </el-form-item>
             <el-form-item>
               <el-button type="primary" @click="submitBorrow">提交借出</el-button>
@@ -54,7 +51,7 @@
             </el-table-column>
             <el-table-column label="操作" width="120">
               <template #default="{ row }">
-                <el-button v-if="row.status === 'borrowed'" size="small" type="success" link @click="returnItem(row)">归还</el-button>
+                <el-button v-if="row.status === 'borrowed' && canReturn(row)" size="small" type="success" link @click="returnItem(row)">归还</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -89,9 +86,33 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, inject } from 'vue'
 import { ElMessage } from 'element-plus'
 import { itemsAPI, borrowAPI, usersAPI } from '../api'
+import { hasPermission } from '../utils/permissions'
+
+const refreshAlerts = inject('refreshAlerts')
+const currentUserId = inject('currentUserId')
+const currentUserRole = inject('currentUserRole')
+const hasPerm = inject('hasPermission', hasPermission)
+
+const isAdmin = computed(() => currentUserRole.value === 'admin')
+const isApprover = computed(() => ['admin', 'approver'].includes(currentUserRole.value))
+const canSelectOtherUser = computed(() => isApprover.value)
+const canSkipApproval = computed(() => isApprover.value)
+
+const borrowableUsers = computed(() => {
+  if (isApprover.value) {
+    return users.value
+  }
+  const me = users.value.find(u => u.id === currentUserId.value)
+  return me ? [me] : []
+})
+
+const canReturn = (row) => {
+  if (isApprover.value) return true
+  return row.borrower_id === currentUserId.value
+}
 
 const activeTab = ref('borrow')
 const items = ref([])
@@ -127,8 +148,16 @@ const fetchItems = async () => {
 
 const fetchUsers = async () => {
   try {
-    const res = await usersAPI.list()
-    users.value = res.data
+    if (isApprover.value) {
+      const res = await usersAPI.list()
+      users.value = res.data
+    } else {
+      const res = await usersAPI.switchable()
+      users.value = res.data
+      if (!borrowForm.value.borrower_id) {
+        borrowForm.value.borrower_id = currentUserId.value
+      }
+    }
   } catch (e) {
     ElMessage.error('获取用户列表失败')
   }
@@ -136,9 +165,13 @@ const fetchUsers = async () => {
 
 const fetchRecords = async () => {
   try {
+    const params = {}
+    if (!isApprover.value) {
+      params.borrower_id = currentUserId.value
+    }
     const [borrowedRes, allRes] = await Promise.all([
-      borrowAPI.records({ status: 'borrowed' }),
-      borrowAPI.records()
+      borrowAPI.records({ status: 'borrowed', ...params }),
+      borrowAPI.records(params)
     ])
     borrowedRecords.value = borrowedRes.data
     allRecords.value = allRes.data
@@ -162,6 +195,9 @@ const submitBorrow = async () => {
     borrowForm.value = { item_id: null, quantity: 1, borrower_id: null, purpose: '', need_approval: true }
     fetchItems()
     fetchRecords()
+    if (refreshAlerts) {
+      refreshAlerts()
+    }
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '提交失败')
   }
@@ -171,11 +207,14 @@ const returnItem = async (row) => {
   try {
     await borrowAPI.returnItem({
       record_id: row.id,
-      operator_id: 1
+      operator_id: currentUserId ? currentUserId.value : 1
     })
     ElMessage.success('归还成功')
     fetchItems()
     fetchRecords()
+    if (refreshAlerts) {
+      refreshAlerts()
+    }
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '归还失败')
   }

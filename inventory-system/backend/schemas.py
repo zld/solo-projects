@@ -13,8 +13,15 @@ class UserCreate(UserBase):
     pass
 
 
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 class User(UserBase):
     id: int
+    is_active: bool
     created_at: datetime
 
     class Config:
